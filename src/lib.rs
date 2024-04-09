@@ -240,11 +240,21 @@ mod tls {
     use std::path::{Path, PathBuf};
     use rustls::{RootCertStore, Certificate, TLSError, ServerCertVerified};
     use webpki::DNSNameRef;
+    use webpki_roots;
     use crate::error::{ConnectError, InternalConnectError};
 
     pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+        if path.as_ref().exists() {
+            tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+        } else {
+            tls_config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+            #[cfg(feature = "tracing")] {
+                tracing::warn!("Certificate file does not exist: {}", path.as_ref().display());
+                tracing::warn!("Using system trust anchors");
+            }
+        }
+
         tls_config.set_protocols(&["h2".into()]);
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))
@@ -275,11 +285,11 @@ mod tls {
 
     impl rustls::ServerCertVerifier for CertVerifier {
         fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-            
+
             if self.certs.len() != presented_certs.len() {
                 return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
             }
-            
+
             for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
                 if *p.0 != **c {
                     return Err(TLSError::General(format!("Server certificates do not match ours")));
